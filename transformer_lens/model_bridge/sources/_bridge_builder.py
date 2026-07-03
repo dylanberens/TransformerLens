@@ -13,6 +13,10 @@ from transformer_lens.factories.architecture_adapter_factory import (
 )
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.model_bridge.bridge import TransformerBridge
+from transformer_lens.model_bridge.sources._hf_format import (
+    map_default_transformer_lens_config,
+    setup_tokenizer,
+)
 
 # Architecture-agnostic; do not extend per-architecture.
 _HF_PASSTHROUGH_ATTRS = [
@@ -42,6 +46,15 @@ _HF_PASSTHROUGH_ATTRS = [
     # Cohere
     "logit_scale",
     "rope_parameters",
+    # Hybrid/MoE architectures
+    "layer_types",
+    "moe_intermediate_size",
+    "norm_eps",
+    "attention_bias",
+    "lm_head_bias",
+    "router_jitter_noise",
+    "input_jitter_noise",
+    "eos_token_id",
 ]
 
 
@@ -52,10 +65,6 @@ def build_bridge_config_from_hf(
     dtype: torch.dtype,
 ) -> TransformerBridgeConfig:
     """Translate an HF config into a :class:`TransformerBridgeConfig`."""
-    from transformer_lens.model_bridge.sources.transformers import (
-        map_default_transformer_lens_config,
-    )
-
     tl_config = map_default_transformer_lens_config(hf_config)
     config_dict = dict(tl_config.__dict__)
     # HF's attribute_map remaps num_experts → num_local_experts; restore the TL name.
@@ -83,10 +92,8 @@ def build_bridge_config_from_hf(
 
 
 def detect_tokenizer_bos_eos(tokenizer: Any) -> tuple[bool, bool]:
-    """Detect whether the tokenizer prepends BOS and/or appends EOS.
-
-    Non-empty test string — "" is unreliable with token aliasing.
-    """
+    """Detect whether the tokenizer prepends BOS and/or appends EOS."""
+    # Non-empty test string — "" is unreliable with token aliasing.
     encoded_test = tokenizer.encode("a")
     prepends_bos = (
         len(encoded_test) > 1
@@ -166,6 +173,7 @@ def build_bridge_from_module(
         # ...) don't leak between bridges built from the same config.
         bridge_config = copy.deepcopy(tl_config)
         bridge_config.architecture = architecture
+        # Explicit kwarg wins over whatever tl_config carries; default only fills a gap.
         if model_name != "external" or not getattr(bridge_config, "model_name", None):
             bridge_config.model_name = model_name
         bridge_config.dtype = dtype
@@ -188,8 +196,6 @@ def build_bridge_from_module(
     adapter.prepare_model(model)
 
     if tokenizer is not None:
-        from transformer_lens.model_bridge.sources.transformers import setup_tokenizer
-
         default_padding_side = getattr(adapter.cfg, "default_padding_side", None)
         tokenizer = setup_tokenizer(tokenizer, default_padding_side=default_padding_side)
         (
@@ -197,4 +203,9 @@ def build_bridge_from_module(
             adapter.cfg.tokenizer_appends_eos,
         ) = detect_tokenizer_bos_eos(tokenizer)
 
-    return TransformerBridge(model, adapter, tokenizer)
+    from transformer_lens.model_bridge.sources.transformers_driver import (
+        TransformersDriver,
+    )
+
+    driver = TransformersDriver(model, adapter, tokenizer)
+    return TransformerBridge(model, adapter, tokenizer, driver=driver)
